@@ -1,9 +1,10 @@
-import tkinter as tk
+﻿import tkinter as tk
 from tkinter import messagebox, filedialog
 from datetime import datetime
 import sqlite3
 import os
 import csv
+import shutil
 from tkinter import ttk
 from invoice_utils import (
     print_invoice_for,
@@ -43,6 +44,67 @@ def _normalize_report_role_filter(value):
     if role == "businessman":
         return "BusinessMan"
     return "Customer"
+
+
+def _set_hidden_windows(path):
+    if os.name != "nt":
+        return
+    if not path or not os.path.exists(path):
+        return
+    try:
+        import ctypes
+        file_attribute_hidden = 0x02
+        existing_attrs = ctypes.windll.kernel32.GetFileAttributesW(str(path))
+        if existing_attrs == -1:
+            return
+        ctypes.windll.kernel32.SetFileAttributesW(str(path), existing_attrs | file_attribute_hidden)
+    except Exception:
+        pass
+
+
+def _resolve_app_db_path():
+    base_dir = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
+    app_dir = os.path.join(base_dir, "JeweleryInvoiceSystem", "data")
+    os.makedirs(app_dir, exist_ok=True)
+    db_path = os.path.join(app_dir, "customers.db")
+
+    legacy_db_path = os.path.join(os.getcwd(), "customers.db")
+    if not os.path.exists(db_path) and os.path.exists(legacy_db_path):
+        try:
+            shutil.move(legacy_db_path, db_path)
+        except Exception:
+            try:
+                shutil.copy2(legacy_db_path, db_path)
+            except Exception:
+                pass
+
+    _set_hidden_windows(app_dir)
+    _set_hidden_windows(db_path)
+    return db_path
+
+
+def _connect_app_db(timeout=30):
+    db_path = _resolve_app_db_path()
+    conn = sqlite3.connect(db_path, timeout=timeout)
+    _set_hidden_windows(os.path.dirname(db_path))
+    _set_hidden_windows(db_path)
+    return conn
+
+
+def _next_invoice_number(conn, now=None):
+    current_date = now or datetime.now()
+    prefix = f"{current_date.year}{current_date.month:02d}"
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT COALESCE(MAX(CAST(SUBSTR(invoice_number, -3) AS INTEGER)), 0)
+        FROM invoices
+        WHERE invoice_number LIKE ?
+        """,
+        (f"{prefix}%",),
+    )
+    next_sequence = int(cursor.fetchone()[0] or 0) + 1
+    return f"{prefix}{next_sequence:03d}"
 
 
 def _format_history_datetime(value):
@@ -376,7 +438,7 @@ class CSVUtils:
             os.makedirs("Invoices", exist_ok=True)
             csv_file_path = os.path.join("Invoices", "master_invoice.csv")
 
-            # 🔥 FILE LOCK CHECK
+            # ðŸ”¥ FILE LOCK CHECK
             if os.path.exists(csv_file_path):
                 try:
                     os.rename(csv_file_path, csv_file_path)
@@ -610,8 +672,9 @@ class InvoiceApp:
             
     def create_database(self):
         try:
-            self.conn = sqlite3.connect("customers.db")
+            self.conn = _connect_app_db(timeout=30)
             self.cursor = self.conn.cursor()
+            self.cursor.execute("PRAGMA busy_timeout = 30000")
 
             # ================= CUSTOMERS =================
             self.cursor.execute("""
@@ -876,14 +939,14 @@ class InvoiceApp:
             if self.cursor.fetchone()[0] == 0:
                 self.cursor.execute("""
                     INSERT INTO pins (pin_type, pin_value)
-                    VALUES ('software', 'Nyctophile@231059')
+                    VALUES ('software', 'Nyctophile@2341059')
                 """)
 
             self.cursor.execute("SELECT COUNT(*) FROM pins WHERE pin_type='admin'")
             if self.cursor.fetchone()[0] == 0:
                 self.cursor.execute("""
                     INSERT INTO pins (pin_type, pin_value)
-                    VALUES ('admin', 'Nyctophile@253110')
+                    VALUES ('admin', 'Nyctophile@2543110')
                 """)
 
             self.conn.commit()
@@ -923,7 +986,7 @@ class InvoiceApp:
             ttk.Button(container, text="Login", command=self.verify_pin).pack(pady=(15, 10))
 
           
-            ttk.Label(container, text="© 2025 Gold Shop | Secure Access Panel", font=("Segoe UI", 9)).pack(pady=(10, 0))
+            ttk.Label(container, text="Â© 2025 Gold Shop | Secure Access Panel", font=("Segoe UI", 9)).pack(pady=(10, 0))
         except Exception as e:
             logging.error(f"PIN Entry UI error: {e}")
             messagebox.showerror("Error", f"Failed to load login screen: {e}")
@@ -1375,18 +1438,7 @@ class InvoicePage:
         self.create_invoice_page()
 
     def generate_invoice_number(self):
-        
-        current_date = datetime.now()
-        cursor = self.customer_details["conn"].cursor()
-        cursor.execute("SELECT MAX(CAST(SUBSTR(invoice_number, -3) AS INTEGER)) FROM invoices")
-        max_invoice_number = cursor.fetchone()[0]
-
-        
-        if max_invoice_number is None:
-            return f"{current_date.year}{current_date.month:02d}001"
-
-       
-        return f"{current_date.year}{current_date.month:02d}{max_invoice_number + 1:03d}"
+        return _next_invoice_number(self.customer_details["conn"])
 
     def create_invoice_page(self):
         self.page_container, self.page_canvas, self.page_content = _create_scrollable_page(self.root)
@@ -1851,7 +1903,7 @@ class InvoicePage:
         payment_entry = tk.Entry(payment_window, width=20)
         payment_entry.pack(pady=5)
 
-        # 🔹 Calculate default grand total
+        # ðŸ”¹ Calculate default grand total
         self.recalculate_items()
         grand_total = self.calculate_invoice_summary()["grand_total"]
         payment_entry.insert(0, str(round(grand_total, 2)))
@@ -1860,7 +1912,7 @@ class InvoicePage:
             try:
                 payment_amount = float(payment_entry.get())
 
-                # 🔹 Recalculate again before saving
+                # ðŸ”¹ Recalculate again before saving
                 exchange_entries = self.get_exchange_entries()
                 self.recalculate_items()
                 summary = self.calculate_invoice_summary()
@@ -1876,43 +1928,7 @@ class InvoicePage:
                 conn = self.customer_details["conn"]
                 cursor = conn.cursor()
 
-                purchase_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                invoice_date = purchase_timestamp
-                updated_at = purchase_timestamp
-
-                # 🔹 Insert invoice master record
-                cursor.execute("""
-                    INSERT INTO invoices (
-                        customer_code,
-                        invoice_number,
-                        invoice_date,
-                        updated_at,
-                        invoice_type,
-                        customer_role,
-                        items_total,
-                        exchange_total,
-                        old_balance_included,
-                        grand_total,
-                        amount_paid,
-                        remaining_balance
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    self.customer_details["customer_code"],
-                    self.invoice_number,
-                    invoice_date,
-                    updated_at,
-                    "retail",
-                    self.customer_details.get("role", "Customer"),
-                    items_total,
-                    exchange_total,
-                    old_balance,
-                    grand_total,
-                    payment_amount,
-                    remaining_balance
-                ))
-
-                # 🔥 STOCK VALIDATION FIRST
+                # ðŸ”¥ STOCK VALIDATION FIRST
                 for item in self.items:
                     stock_id = item.get("Stock ID")
                     sold_qty = float(item["Quantity"])
@@ -1924,6 +1940,7 @@ class InvoicePage:
                             "Stock Error",
                             f"Missing stock selection for {item['Product Name']}. Re-add this item from stock."
                         )
+                        conn.rollback()
                         return
 
                     cursor.execute("""
@@ -1938,6 +1955,7 @@ class InvoicePage:
                             "Stock Error",
                             f"Stock ID {stock_id} for {item['Product Name']} was not found."
                         )
+                        conn.rollback()
                         return
 
                     _, available_qty, available_net, available_gross = stock_row
@@ -1950,9 +1968,61 @@ class InvoicePage:
                             "Stock Error",
                             f"Not enough stock in Stock ID {stock_id} for {item['Product Name']}."
                         )
+                        conn.rollback()
                         return
 
-                # 🔹 Insert invoice details + deduct stock
+                purchase_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                invoice_date = purchase_timestamp
+                updated_at = purchase_timestamp
+
+                # Reserve invoice number at save-time to avoid collisions across counters.
+                inserted_master = False
+                for _ in range(25):
+                    candidate_invoice_number = _next_invoice_number(conn)
+                    try:
+                        cursor.execute("""
+                            INSERT INTO invoices (
+                                customer_code,
+                                invoice_number,
+                                invoice_date,
+                                updated_at,
+                                invoice_type,
+                                customer_role,
+                                items_total,
+                                exchange_total,
+                                old_balance_included,
+                                grand_total,
+                                amount_paid,
+                                remaining_balance
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            self.customer_details["customer_code"],
+                            candidate_invoice_number,
+                            invoice_date,
+                            updated_at,
+                            "retail",
+                            self.customer_details.get("role", "Customer"),
+                            items_total,
+                            exchange_total,
+                            old_balance,
+                            grand_total,
+                            payment_amount,
+                            remaining_balance
+                        ))
+                        self.invoice_number = candidate_invoice_number
+                        inserted_master = True
+                        break
+                    except sqlite3.IntegrityError as exc:
+                        conn.rollback()
+                        if "UNIQUE constraint failed: invoices.invoice_number" in str(exc):
+                            continue
+                        raise
+
+                if not inserted_master:
+                    raise ValueError("Unable to reserve a unique invoice number. Please try again.")
+
+                # ðŸ”¹ Insert invoice details + deduct stock
                 for item in self.items:
                     stock_id = item["Stock ID"]
 
@@ -2001,7 +2071,7 @@ class InvoicePage:
                         item["Category"]
                     ))
 
-                    # 🔥 Deduct stock
+                    # ðŸ”¥ Deduct stock
                     sold_qty = float(item["Quantity"])
                     sold_net = sold_qty * float(item["Net Weight"])
                     sold_gross = sold_qty * float(item["Gross Weight"])
@@ -2043,7 +2113,7 @@ class InvoicePage:
                         exchange_item["exchange_amount"]
                     ))
 
-                # 🔹 Update customer balance
+                # ðŸ”¹ Update customer balance
                 cursor.execute("""
                     UPDATE customers
                     SET balance = ?
@@ -2079,7 +2149,7 @@ class InvoicePage:
 
                 conn.commit()
 
-                # 🔹 Export CSV
+                # ðŸ”¹ Export CSV
                 try:
                     CSVUtils.export_master_csv(conn)
                 except Exception as e:
@@ -2090,7 +2160,7 @@ class InvoicePage:
                     refresh_customer_invoice_files(conn, self.customer_details["customer_code"])
                 except Exception as e:
                     logging.error(f"Invoice text refresh error: {e}")
-                # 🔹 Print invoice
+                # ðŸ”¹ Print invoice
                 try:
                     print_invoice_for(conn, self.invoice_number)
                 except Exception as e:
@@ -2110,8 +2180,16 @@ class InvoicePage:
                     self.go_back_callback()
 
             except ValueError as e:
+                try:
+                    self.customer_details["conn"].rollback()
+                except Exception:
+                    pass
                 messagebox.showerror("Error", str(e) if str(e) else "Enter valid payment amount.")
             except Exception as e:
+                try:
+                    self.customer_details["conn"].rollback()
+                except Exception:
+                    pass
                 logging.error(f"Payment processing error: {e}")
                 messagebox.showerror("Error", f"Payment failed: {e}")
 
@@ -2388,9 +2466,9 @@ class InvoicePage:
         self.total_amount = self.grand_total
 
 
-        # ✅ DEFINE total_amount PROPERLY
+        # âœ… DEFINE total_amount PROPERLY
 
-        # ✅ UPDATE LABELS
+        # âœ… UPDATE LABELS
         if hasattr(self, "old_balance_label"):
             self.old_balance_label.config(
                 text=f"Old Balance: {self.old_balance:.2f}"
@@ -2462,13 +2540,7 @@ class BusinessInvoicePage:
         self.create_invoice_page()
 
     def generate_invoice_number(self):
-        current_date = datetime.now()
-        cursor = self.customer_details["conn"].cursor()
-        cursor.execute("SELECT MAX(CAST(SUBSTR(invoice_number, -3) AS INTEGER)) FROM invoices")
-        max_invoice_number = cursor.fetchone()[0]
-        if max_invoice_number is None:
-            return f"{current_date.year}{current_date.month:02d}001"
-        return f"{current_date.year}{current_date.month:02d}{max_invoice_number + 1:03d}"
+        return _next_invoice_number(self.customer_details["conn"])
 
     def parse_float(self, value):
         try:
@@ -3015,38 +3087,53 @@ class BusinessInvoicePage:
                 invoice_date = purchase_timestamp
                 updated_at = purchase_timestamp
 
-                cursor.execute("""
-                    INSERT INTO invoices (
-                        customer_code, invoice_number, invoice_date, updated_at,
-                        invoice_type, customer_role,
-                        items_total, exchange_total, old_balance_included, grand_total,
-                        amount_paid, remaining_balance,
-                        payment_mode, paid_fine_24k, paid_price_equivalent,
-                        business_items_fine, business_exchange_fine,
-                        from_last_invoice_fine, carry_forward_fine
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    self.customer_details["customer_code"],
-                    self.invoice_number,
-                    invoice_date,
-                    updated_at,
-                    "business",
-                    "BusinessMan",
-                    summary["items_total"],
-                    paid_price_equivalent,
-                    summary["old_balance"],
-                    gross_total_amount,
-                    paid_price_equivalent,
-                    remaining_balance,
-                    payment_mode,
-                    paid_fine,
-                    paid_price_equivalent,
-                    summary["items_fine_total"],
-                    paid_fine,
-                    summary["old_balance_fine"],
-                    next_carry_forward_fine,
-                ))
+                inserted_master = False
+                for _ in range(25):
+                    candidate_invoice_number = _next_invoice_number(conn)
+                    try:
+                        cursor.execute("""
+                            INSERT INTO invoices (
+                                customer_code, invoice_number, invoice_date, updated_at,
+                                invoice_type, customer_role,
+                                items_total, exchange_total, old_balance_included, grand_total,
+                                amount_paid, remaining_balance,
+                                payment_mode, paid_fine_24k, paid_price_equivalent,
+                                business_items_fine, business_exchange_fine,
+                                from_last_invoice_fine, carry_forward_fine
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            self.customer_details["customer_code"],
+                            candidate_invoice_number,
+                            invoice_date,
+                            updated_at,
+                            "business",
+                            "BusinessMan",
+                            summary["items_total"],
+                            paid_price_equivalent,
+                            summary["old_balance"],
+                            gross_total_amount,
+                            paid_price_equivalent,
+                            remaining_balance,
+                            payment_mode,
+                            paid_fine,
+                            paid_price_equivalent,
+                            summary["items_fine_total"],
+                            paid_fine,
+                            summary["old_balance_fine"],
+                            next_carry_forward_fine,
+                        ))
+                        self.invoice_number = candidate_invoice_number
+                        inserted_master = True
+                        break
+                    except sqlite3.IntegrityError as exc:
+                        conn.rollback()
+                        if "UNIQUE constraint failed: invoices.invoice_number" in str(exc):
+                            continue
+                        raise
+
+                if not inserted_master:
+                    raise ValueError("Unable to reserve a unique invoice number. Please try again.")
 
                 for item in self.items:
                     cursor.execute("""
@@ -3122,8 +3209,16 @@ class BusinessInvoicePage:
                 payment_window.destroy()
                 self.go_back_callback()
             except ValueError as exc:
+                try:
+                    self.customer_details["conn"].rollback()
+                except Exception:
+                    pass
                 messagebox.showerror("Error", str(exc) if str(exc) else "Enter a valid payment amount.")
             except Exception as e:
+                try:
+                    self.customer_details["conn"].rollback()
+                except Exception:
+                    pass
                 logging.error(f"Business payment processing error: {e}")
                 messagebox.showerror("Error", f"Payment failed: {e}")
 
@@ -3286,8 +3381,9 @@ class AddItemPage:
         self.root = root
         self.add_item_callback = add_item_callback
         self.go_back_callback = go_back_callback
-        self.conn = sqlite3.connect('customers.db')  
+        self.conn = _connect_app_db(timeout=30)
         self.cursor = self.conn.cursor()
+        self.cursor.execute("PRAGMA busy_timeout = 30000")
         self.create_add_item_page()
 
     def create_add_item_page(self):
@@ -3493,7 +3589,7 @@ class EditItemPage:
                 "Net Weight": net_weight,
                 "Gross Weight": gross_weight,
                 "Rate Per Gram": rate_per_gram,
-                "Category": self.gold_type.get()  # 🔥 CRITICAL FIX
+                "Category": self.gold_type.get()  # ðŸ”¥ CRITICAL FIX
             }
 
             if "Stock ID" in self.item_details:
@@ -6041,5 +6137,4 @@ if __name__ == "__main__":
     app =InvoiceApp(root)
     root.mainloop()
 
-
-        
+ 
